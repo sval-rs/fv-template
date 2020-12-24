@@ -217,9 +217,9 @@ impl Template {
         self.after_template.iter()
     }
 
-    pub fn to_rt_tokens(&self) -> TokenStream {
+    pub fn to_rt_tokens(&self, base: TokenStream) -> TokenStream {
         let parts = self.template.iter().map(|part| match part {
-            Part::Text { text, .. } => quote!(fv_template::rt::Part::Text(#text)),
+            Part::Text { text, .. } => quote!(#base::Part::Text(#text)),
             Part::Hole { expr, .. } => {
                 let label = ExprLit {
                     attrs: vec![],
@@ -233,12 +233,12 @@ impl Template {
                     }),
                 };
 
-                quote!(fv_template::rt::Part::Hole(#label))
+                quote!(#base::Part::Hole(#label))
             }
         });
 
         quote!(
-            fv_template::rt::template(&[#(#parts),*])
+            #base::template(&[#(#parts),*])
         )
     }
 }
