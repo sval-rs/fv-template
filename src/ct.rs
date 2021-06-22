@@ -73,6 +73,7 @@ impl Error {
 /**
 A compile-time field value template.
 */
+#[derive(Debug)]
 pub struct Template {
     before_template: Vec<FieldValue>,
     template: Vec<Part>,
@@ -218,28 +219,67 @@ impl Template {
     }
 
     pub fn to_rt_tokens(&self, base: TokenStream) -> TokenStream {
+        struct DefaultVisitor;
+
+        impl Visitor for DefaultVisitor {}
+
+        self.to_rt_tokens_with_visitor(base, DefaultVisitor)
+    }
+
+    pub fn to_rt_tokens_with_visitor(&self, base: TokenStream, mut visitor: impl Visitor) -> TokenStream {
         let parts = self.template.iter().map(|part| match part {
             Part::Text { text, .. } => quote!(#base::Part::Text(#text)),
             Part::Hole { expr, .. } => {
-                let label = ExprLit {
-                    attrs: vec![],
-                    lit: Lit::Str(match expr.member {
-                        Member::Named(ref member) => {
-                            LitStr::new(&member.to_string(), member.span())
-                        }
-                        Member::Unnamed(ref member) => {
-                            LitStr::new(&member.index.to_string(), member.span)
-                        }
-                    }),
+                let (label, hole) = match expr.member {
+                    Member::Named(ref member) => {
+                        (
+                            member.to_string(),
+                            ExprLit {
+                                attrs: vec![],
+                                lit: Lit::Str(LitStr::new(&member.to_string(), member.span())),
+                            },
+                        )
+                    }
+                    Member::Unnamed(ref member) => {
+                        (
+                            member.index.to_string(),
+                            ExprLit {
+                                attrs: vec![],
+                                lit: Lit::Str(LitStr::new(&member.index.to_string(), member.span)),
+                            },
+                        )
+                    }
                 };
 
-                quote!(#base::Part::Hole(#label))
+                visitor.visit_hole(&label, quote!(#base::Part::Hole(#hole)))
             }
         });
 
         quote!(
             #base::template(&[#(#parts),*])
         )
+    }
+}
+
+/**
+A visitor for the construction of a runtime template.
+*/
+pub trait Visitor {
+    /**
+    Visit a hole.
+    */
+    fn visit_hole(&mut self, label: &str, hole: TokenStream) -> TokenStream {
+        let _ = label;
+        hole
+    }
+}
+
+impl<'a, V: ?Sized> Visitor for &'a mut V
+where
+    V: Visitor,
+{
+    fn visit_hole(&mut self, label: &str, hole: TokenStream) -> TokenStream {
+        (**self).visit_hole(label, hole)
     }
 }
 
