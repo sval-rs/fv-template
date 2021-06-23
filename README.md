@@ -1,5 +1,9 @@
 # `fv-template`
 
+[![Rust](https://github.com/sval-rs/fv-template/workflows/Rust/badge.svg)](https://github.com/sval-rs/fv-template/actions)
+[![Latest version](https://img.shields.io/crates/v/fv-template.svg)](https://crates.io/crates/fv-template)
+[![Documentation Latest](https://docs.rs/fv-template/badge.svg)](https://docs.rs/fv-template)
+
 An alternative to `format_args!` (and `log!`) for string templating. Templates take the following form:
 
 ```
