@@ -68,12 +68,18 @@ impl Error {
             source: None,
         }
     }
+
+    fn unsupported_comment() -> Self {
+        Error {
+            reason: format!("comments within expressions are not supported"),
+            source: None,
+        }
+    }
 }
 
 /**
 A compile-time field value template.
 */
-#[derive(Debug)]
 pub struct Template {
     before_template: Vec<FieldValue>,
     template: Vec<Part>,
@@ -226,29 +232,29 @@ impl Template {
         self.to_rt_tokens_with_visitor(base, DefaultVisitor)
     }
 
-    pub fn to_rt_tokens_with_visitor(&self, base: TokenStream, mut visitor: impl Visitor) -> TokenStream {
+    pub fn to_rt_tokens_with_visitor(
+        &self,
+        base: TokenStream,
+        mut visitor: impl Visitor,
+    ) -> TokenStream {
         let parts = self.template.iter().map(|part| match part {
             Part::Text { text, .. } => quote!(#base::Part::Text(#text)),
             Part::Hole { expr, .. } => {
                 let (label, hole) = match expr.member {
-                    Member::Named(ref member) => {
-                        (
-                            member.to_string(),
-                            ExprLit {
-                                attrs: vec![],
-                                lit: Lit::Str(LitStr::new(&member.to_string(), member.span())),
-                            },
-                        )
-                    }
-                    Member::Unnamed(ref member) => {
-                        (
-                            member.index.to_string(),
-                            ExprLit {
-                                attrs: vec![],
-                                lit: Lit::Str(LitStr::new(&member.index.to_string(), member.span)),
-                            },
-                        )
-                    }
+                    Member::Named(ref member) => (
+                        member.to_string(),
+                        ExprLit {
+                            attrs: vec![],
+                            lit: Lit::Str(LitStr::new(&member.to_string(), member.span())),
+                        },
+                    ),
+                    Member::Unnamed(ref member) => (
+                        member.index.to_string(),
+                        ExprLit {
+                            attrs: vec![],
+                            lit: Lit::Str(LitStr::new(&member.index.to_string(), member.span)),
+                        },
+                    ),
                 };
 
                 visitor.visit_hole(&label, quote!(#base::Part::Hole(#hole)))
@@ -413,33 +419,75 @@ impl Part {
                 let mut depth = 1;
                 let mut matched_hole_end = false;
                 let mut escaped = false;
+                let mut next_terminator_escaped = false;
+                let mut terminator = None;
 
-                let scanned = self.take_until(|c, _| {
-                    // NOTE: This isn't perfect, it will fail for `{` and `}` within strings:
-                    // "Hello {#[log::debug] "some { string"}"
+                let scanned = self.take_until(|c, rest| {
                     match c {
                         // If the depth would return to its start then we've got a full expression
-                        '}' if depth == 1 => {
+                        '}' if terminator.is_none() && depth == 1 => {
                             matched_hole_end = true;
                             Ok(true)
                         }
                         // A block end will reduce the depth
-                        '}' => {
+                        '}' if terminator.is_none() => {
                             depth -= 1;
                             Ok(false)
                         }
                         // A block start will increase the depth
-                        '{' => {
+                        '{' if terminator.is_none() => {
                             depth += 1;
                             Ok(false)
                         }
+                        // A double quote may be the start or end of a string
+                        // It may also be escaped
+                        '"' if terminator.is_none() => {
+                            terminator = Some('"');
+                            Ok(false)
+                        }
+                        // A single quote may be the start or end of a character
+                        // It may also be escaped
+                        '\'' if terminator.is_none() => {
+                            terminator = Some('\'');
+                            Ok(false)
+                        }
                         // A `\` means there's embedded escaped characters
-                        // For strings, we're only interested in `\"`
+                        // These may be escapes the user needs to represent a `"`
+                        // or they may be intended to appear in the final string
+                        '\\' if rest
+                            .peek()
+                            .map(|(_, peeked)| *peeked == '\\')
+                            .unwrap_or(false) =>
+                        {
+                            next_terminator_escaped = !next_terminator_escaped;
+                            escaped = true;
+                            Ok(false)
+                        }
                         '\\' => {
                             escaped = true;
                             Ok(false)
                         }
-                        _ => Ok(false),
+                        // The sequence `//` or `/*` means the expression contains a comment
+                        // These aren't supported so bail with an error
+                        '/' if rest
+                            .peek()
+                            .map(|(_, peeked)| *peeked == '/' || *peeked == '*')
+                            .unwrap_or(false) =>
+                        {
+                            Err(Error::unsupported_comment())
+                        }
+                        // If the current character is a terminator and it's not escaped
+                        // then break out of the current string or character
+                        c if Some(c) == terminator && !next_terminator_escaped => {
+                            terminator = None;
+                            Ok(false)
+                        }
+                        // If the current character is anything else then discard escaping
+                        // for the next character
+                        _ => {
+                            next_terminator_escaped = false;
+                            Ok(false)
+                        }
                     }
                 })?;
 
@@ -612,6 +660,33 @@ mod tests {
                 "🎈📌 Hello world {{}}",
                 vec![text("🎈📌 Hello world {}", 1..26)],
             ),
+            (
+                "Hello {#[log::debug] world: \"{\"} 🎈📌",
+                vec![
+                    text("Hello ", 1..7),
+                    hole("#[log::debug] world: \"{\"", 8..34),
+                    text(" 🎈📌", 35..44),
+                ],
+            ),
+            (
+                "Hello {#[log::debug] world: '{'} 🎈📌",
+                vec![
+                    text("Hello ", 1..7),
+                    hole("#[log::debug] world: '{'", 8..32),
+                    text(" 🎈📌", 33..42),
+                ],
+            ),
+            (
+                "Hello {#[log::debug] world: \"is text with 'embedded' stuff\"} 🎈📌",
+                vec![
+                    text("Hello ", 1..7),
+                    hole(
+                        "#[log::debug] world: \"is text with 'embedded' stuff\"",
+                        8..62,
+                    ),
+                    text(" 🎈📌", 63..72),
+                ],
+            ),
             ("{{", vec![text("{", 1..3)]),
             ("}}", vec![text("}", 1..3)]),
         ];
@@ -644,6 +719,8 @@ mod tests {
             ("a }", "parsing failed: `{` and `}` characters must be escaped as `{{` and `}}`"),
             ("{}", "parsing failed: empty replacements (`{}`) aren\'t supported, put the replacement inside like `{some_value}`"),
             ("{not real rust}", "parsing failed: failed to parse `not real rust` as an expression"),
+            ("{// a comment!}", "parsing failed: comments within expressions are not supported"),
+            ("{/* a comment! */}", "parsing failed: comments within expressions are not supported"),
         ];
 
         for (template, expected) in cases {
