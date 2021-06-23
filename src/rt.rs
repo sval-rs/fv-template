@@ -74,6 +74,9 @@ impl
         fn(&mut fmt::Formatter, &str) -> fmt::Result,
     >
 {
+    /**
+    Create a new rendering context with default handling for holes.
+    */
     pub fn new() -> Self {
         Context {
             fill: |_, _| None,
@@ -125,11 +128,26 @@ impl Default
     }
 }
 
+/**
+A fragment of a template.
+
+A set of `Part`s can be concatenated to form a user-facing representation
+of a template.
+*/
 pub enum Part<'a> {
+    /**
+    A plain text fragment.
+    */
     Text(&'a str),
+    /**
+    A hole in the template with a corresponding label to fill.
+    */
     Hole(&'a str),
 }
 
+/**
+Construct a `Template` from a set of `Part`s.
+*/
 pub fn template<'a>(parts: &'a [Part<'a>]) -> Template<'a> {
     Template { parts }
 }

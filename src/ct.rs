@@ -87,6 +87,11 @@ pub struct Template {
 }
 
 impl Template {
+    /**
+    Parse a template from a `TokenStream`.
+
+    The `TokenStream` is typically all the tokens given to a macro.
+    */
     pub fn parse2(input: TokenStream) -> Result<Self, Error> {
         struct Scan {
             iter: Peekable<token_stream::IntoIter>,
@@ -206,10 +211,16 @@ impl Template {
         })
     }
 
+    /**
+    Field values that appear before the template string literal.
+    */
     pub fn before_template_field_values<'a>(&'a self) -> impl Iterator<Item = &'a FieldValue> {
         self.before_template.iter()
     }
 
+    /**
+    Field values that appear within the template string literal.
+    */
     pub fn template_field_values<'a>(&'a self) -> impl Iterator<Item = &'a FieldValue> {
         self.template.iter().filter_map(|part| {
             if let Part::Hole { expr, .. } = part {
@@ -220,10 +231,16 @@ impl Template {
         })
     }
 
+    /**
+    Field values that appear after the template string literal.
+    */
     pub fn after_template_field_values<'a>(&'a self) -> impl Iterator<Item = &'a FieldValue> {
         self.after_template.iter()
     }
 
+    /**
+    Generate a `TokenStream` that constructs a runtime representation of this template.
+    */
     pub fn to_rt_tokens(&self, base: TokenStream) -> TokenStream {
         struct DefaultVisitor;
 
@@ -232,6 +249,11 @@ impl Template {
         self.to_rt_tokens_with_visitor(base, DefaultVisitor)
     }
 
+    /**
+    Generate a `TokenStream` the constructs a runtime representation of this template.
+
+    The `Visitor` has a chance to modify fragments of the template during code generation.
+    */
     pub fn to_rt_tokens_with_visitor(
         &self,
         base: TokenStream,
