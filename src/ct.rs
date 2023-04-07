@@ -83,17 +83,17 @@ impl Error {
         }
     }
 
-    fn lex_expr(span: Span, expr: &str, err: proc_macro2::LexError) -> Self {
+    fn lex_fv_expr(span: Span, expr: &str, err: proc_macro2::LexError) -> Self {
         Error {
-            reason: format!("failed to parse `{}` as an expression", expr),
+            reason: format!("failed to parse `{}` as a field-value expression", expr),
             span,
             source: Some(format!("{:?}", err).into()),
         }
     }
 
-    fn parse_expr(span: Span, expr: &str, err: syn::Error) -> Self {
+    fn parse_fv_expr(span: Span, expr: &str, err: syn::Error) -> Self {
         Error {
-            reason: format!("failed to parse `{}` as an expression", expr),
+            reason: format!("failed to parse `{}` as a field-value expression", expr),
             span,
             source: Some(err.into()),
         }
@@ -212,18 +212,26 @@ impl Template {
                 }
             }
 
-            fn collect_field_values(mut self) -> Vec<FieldValue> {
+            fn collect_field_values(mut self) -> Result<Vec<FieldValue>, Error> {
                 let mut result = Vec::new();
 
                 while self.has_input() {
                     let (arg, _) = self.take_until(|tt| Self::is_punct(&tt, ','));
 
                     if !arg.is_empty() {
-                        result.push(syn::parse2::<FieldValue>(arg).unwrap());
+                        let expr_span = arg.span();
+
+                        result.push(syn::parse2::<FieldValue>(arg).map_err(|e| {
+                            Error::parse_fv_expr(
+                                expr_span,
+                                expr_span.source_text().as_deref().unwrap_or("<unknown>"),
+                                e,
+                            )
+                        })?);
                     }
                 }
 
-                result
+                Ok(result)
             }
         }
 
@@ -262,12 +270,12 @@ impl Template {
             TokenStream::new()
         };
 
-        let before_template = Scan::new(before_template).collect_field_values();
-        let after_template = Scan::new(after_template).collect_field_values();
-
         let template = Part::parse_lit2(Scan::take_literal(
             template.expect("missing string template"),
         )?)?;
+
+        let before_template = Scan::new(before_template).collect_field_values()?;
+        let after_template = Scan::new(after_template).collect_field_values()?;
 
         Ok(Template {
             before_template,
@@ -388,7 +396,6 @@ pub(super) enum Part {
     A replacement expression.
     */
     Hole {
-        // TODO: Set the span on this properly
         expr: FieldValue,
         range: Range<usize>,
     },
@@ -645,6 +652,20 @@ impl Part {
             Hole,
         }
 
+        fn respan(tokens: TokenStream, span: Option<Span>) -> TokenStream {
+            if let Some(span) = span {
+                tokens
+                    .into_iter()
+                    .map(|mut tt| {
+                        tt.set_span(span);
+                        tt
+                    })
+                    .collect()
+            } else {
+                tokens
+            }
+        }
+
         let input = lit.to_string();
 
         let mut parts = Vec::new();
@@ -695,25 +716,15 @@ impl Part {
 
                     let tokens = {
                         let tokens: TokenStream = str::parse(&*expr).map_err(|e| {
-                            Error::lex_expr(expr_span.unwrap_or(scan.lit.span()), &*expr, e)
+                            Error::lex_fv_expr(expr_span.unwrap_or(scan.lit.span()), &*expr, e)
                         })?;
 
                         // Set the span to the correct place within the literal
-                        if let Some(span) = scan.lit.subspan(range.start..range.end) {
-                            tokens
-                                .into_iter()
-                                .map(|mut tt| {
-                                    tt.set_span(span);
-                                    tt
-                                })
-                                .collect()
-                        } else {
-                            tokens
-                        }
+                        respan(tokens, scan.lit.subspan(range.start..range.end))
                     };
 
                     let expr = syn::parse2(tokens).map_err(|e| {
-                        Error::parse_expr(expr_span.unwrap_or(scan.lit.span()), &*expr, e)
+                        Error::parse_fv_expr(expr_span.unwrap_or(scan.lit.span()), &*expr, e)
                     })?;
 
                     parts.push(Part::Hole { expr, range });
@@ -857,7 +868,7 @@ mod tests {
             ("a } a", "parsing failed: `{` and `}` characters must be escaped as `{{` and `}}`"),
             ("a }", "parsing failed: `{` and `}` characters must be escaped as `{{` and `}}`"),
             ("{}", "parsing failed: empty replacements (`{}`) aren\'t supported, put the replacement inside like `{some_value}`"),
-            ("{not real rust}", "parsing failed: failed to parse `not real rust` as an expression"),
+            ("{not real rust}", "parsing failed: failed to parse `not real rust` as a field-value expression"),
             ("{// a comment!}", "parsing failed: comments within expressions are not supported"),
             ("{/* a comment! */}", "parsing failed: comments within expressions are not supported"),
         ];
