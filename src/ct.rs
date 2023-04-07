@@ -10,9 +10,9 @@ use std::{
     str::{self, CharIndices},
 };
 
-use proc_macro2::{token_stream, Literal, TokenStream, TokenTree};
+use proc_macro2::{token_stream, Literal, Span, TokenStream, TokenTree};
 use quote::ToTokens;
-use syn::{ExprLit, FieldValue, Lit, LitStr, Member};
+use syn::{spanned::Spanned, ExprLit, FieldValue, Lit, LitStr, Member};
 use thiserror::Error;
 
 /**
@@ -23,56 +23,114 @@ An error encountered while parsing a template.
 pub struct Error {
     reason: String,
     source: Option<Box<dyn std::error::Error>>,
-    // TODO: Source span (position or range)
+    span: Span,
+}
+
+fn display_list<'a>(l: &'a [impl fmt::Display]) -> impl fmt::Display + 'a {
+    struct DisplayList<'a, T>(&'a [T]);
+
+    impl<'a, T: fmt::Display> fmt::Display for DisplayList<'a, T> {
+        fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            match self.0.len() {
+                1 => write!(f, "`{}`", self.0[0]),
+                _ => {
+                    let mut first = true;
+
+                    for item in self.0 {
+                        if !first {
+                            write!(f, ", ")?;
+                        }
+                        first = false;
+
+                        write!(f, "`{}`", item)?;
+                    }
+
+                    Ok(())
+                }
+            }
+        }
+    }
+
+    DisplayList(l)
 }
 
 impl Error {
-    fn incomplete_hole() -> Self {
+    pub fn span(&self) -> Span {
+        self.span
+    }
+
+    fn incomplete_hole(span: Span) -> Self {
         Error {
             reason: format!("unexpected end of input, expected `}}`"),
             source: None,
+            span,
         }
     }
 
-    fn unescaped_hole() -> Self {
+    fn unescaped_hole(span: Span) -> Self {
         Error {
             reason: format!("`{{` and `}}` characters must be escaped as `{{{{` and `}}}}`"),
             source: None,
+            span,
         }
     }
 
-    fn missing_expr() -> Self {
+    fn missing_expr(span: Span) -> Self {
         Error {
             reason: format!("empty replacements (`{{}}`) aren't supported, put the replacement inside like `{{some_value}}`"),
             source: None,
+            span,
         }
     }
 
-    fn lex_expr(expr: &str, err: proc_macro2::LexError) -> Self {
+    fn lex_expr(span: Span, expr: &str, err: proc_macro2::LexError) -> Self {
         Error {
             reason: format!("failed to parse `{}` as an expression", expr),
+            span,
             source: Some(format!("{:?}", err).into()),
         }
     }
 
-    fn parse_expr(expr: &str, err: syn::Error) -> Self {
+    fn parse_expr(span: Span, expr: &str, err: syn::Error) -> Self {
         Error {
             reason: format!("failed to parse `{}` as an expression", expr),
+            span,
             source: Some(err.into()),
         }
     }
 
-    fn invalid_literal() -> Self {
+    fn invalid_literal(span: Span) -> Self {
         Error {
             reason: format!("templates must be parsed from string literals"),
             source: None,
+            span,
         }
     }
 
-    fn unsupported_comment() -> Self {
+    fn invalid_char(span: Span, expected: &[char]) -> Self {
+        Error {
+            reason: format!("invalid character, expected: {}", display_list(expected)),
+            source: None,
+            span,
+        }
+    }
+
+    fn invalid_char_eof(span: Span, expected: &[char]) -> Self {
+        Error {
+            reason: format!(
+                "unexpected end-of-input, expected: {}",
+                display_list(expected)
+            ),
+            source: None,
+            span,
+        }
+    }
+
+    fn unsupported_comment(span: Span) -> Self {
         Error {
             reason: format!("comments within expressions are not supported"),
             source: None,
+            span,
         }
     }
 }
@@ -94,12 +152,14 @@ impl Template {
     */
     pub fn parse2(input: TokenStream) -> Result<Self, Error> {
         struct Scan {
+            span: Span,
             iter: Peekable<token_stream::IntoIter>,
         }
 
         impl Scan {
             fn new(input: TokenStream) -> Self {
                 Scan {
+                    span: input.span(),
                     iter: input.into_iter().peekable(),
                 }
             }
@@ -132,17 +192,23 @@ impl Template {
                 }
             }
 
-            fn expect_punct(&mut self, c: char) -> TokenTree {
-                self.iter
-                    .next()
-                    .filter(|tt| Self::is_punct(tt, c))
-                    .unwrap_or_else(|| panic!("expected a {:?} character", c))
+            fn expect_punct(&mut self, c: char) -> Result<TokenTree, Error> {
+                match self.iter.next() {
+                    Some(tt) => {
+                        if Self::is_punct(&tt, c) {
+                            Ok(tt)
+                        } else {
+                            Err(Error::invalid_char(tt.span(), &[c]))
+                        }
+                    }
+                    None => Err(Error::invalid_char_eof(self.span, &[c])),
+                }
             }
 
-            fn take_literal(tt: TokenTree) -> Literal {
+            fn take_literal(tt: TokenTree) -> Result<Literal, Error> {
                 match tt {
-                    TokenTree::Literal(l) => l,
-                    _ => panic!("expected a literal"),
+                    TokenTree::Literal(l) => Ok(l),
+                    _ => Err(Error::invalid_literal(tt.span())),
                 }
             }
 
@@ -190,7 +256,7 @@ impl Template {
 
         // If there's more tokens, they should be a comma followed by comma-separated field-values
         let after_template = if scan.has_input() {
-            scan.expect_punct(',');
+            scan.expect_punct(',')?;
             scan.iter.collect()
         } else {
             TokenStream::new()
@@ -201,8 +267,7 @@ impl Template {
 
         let template = Part::parse_lit2(Scan::take_literal(
             template.expect("missing string template"),
-        ))
-        .expect("failed to parse");
+        )?)?;
 
         Ok(Template {
             before_template,
@@ -349,27 +414,37 @@ impl fmt::Debug for Part {
 impl Part {
     fn parse_lit2(lit: Literal) -> Result<Vec<Self>, Error> {
         struct Scan<'input> {
+            lit: Literal,
             input: &'input str,
             start: usize,
             end: usize,
-            iter: Peekable<CharIndices<'input>>,
+            rest: Peekable<CharIndices<'input>>,
+        }
+
+        struct TakeUntil<'a, 'input> {
+            current: char,
+            current_idx: usize,
+            rest: &'a mut Peekable<CharIndices<'input>>,
+            lit: &'a Literal,
         }
 
         impl<'input> Scan<'input> {
             fn has_input(&mut self) -> bool {
-                self.iter.peek().is_some()
+                self.rest.peek().is_some()
             }
 
             fn take_until(
                 &mut self,
-                mut until_true: impl FnMut(
-                    char,
-                    &mut Peekable<CharIndices<'input>>,
-                ) -> Result<bool, Error>,
+                mut until_true: impl FnMut(TakeUntil<'_, 'input>) -> Result<bool, Error>,
             ) -> Result<Option<(Cow<'input, str>, Range<usize>)>, Error> {
                 let mut scan = || {
-                    while let Some((i, c)) = self.iter.next() {
-                        if until_true(c, &mut self.iter)? {
+                    while let Some((i, c)) = self.rest.next() {
+                        if until_true(TakeUntil {
+                            current: c,
+                            current_idx: i,
+                            rest: &mut self.rest,
+                            lit: &self.lit,
+                        })? {
                             let start = self.start;
                             let end = i;
 
@@ -396,31 +471,50 @@ impl Part {
                 &mut self,
             ) -> Result<Option<(Cow<'input, str>, Range<usize>)>, Error> {
                 let mut escaped = false;
-                let scanned = self.take_until(|c, rest| match c {
+                let scanned = self.take_until(|state| match state.current {
                     // A `{` that's followed by another `{` is escaped
                     // If it's followed by a different character then it's
                     // the start of an interpolated expression
-                    '{' => match rest.peek().map(|(_, peeked)| *peeked) {
-                        Some('{') => {
-                            escaped = true;
-                            let _ = rest.next();
-                            Ok(false)
+                    '{' => {
+                        let start = state.current_idx;
+
+                        match state.rest.peek().map(|(_, peeked)| *peeked) {
+                            Some('{') => {
+                                escaped = true;
+                                let _ = state.rest.next();
+                                Ok(false)
+                            }
+                            Some(_) => Ok(true),
+                            None => Err(Error::incomplete_hole(
+                                state
+                                    .lit
+                                    .subspan(start..start + 1)
+                                    .unwrap_or(state.lit.span()),
+                            )),
                         }
-                        Some(_) => Ok(true),
-                        None => Err(Error::incomplete_hole()),
-                    },
+                    }
                     // A `}` that's followed by another `}` is escaped
                     // We should never see these in this parser unless they're escaped
                     // If we do it means an interpolated expression is missing its start
                     // or it's been improperly escaped
-                    '}' => match rest.peek().map(|(_, peeked)| *peeked) {
+                    '}' => match state.rest.peek().map(|(_, peeked)| *peeked) {
                         Some('}') => {
                             escaped = true;
-                            let _ = rest.next();
+                            let _ = state.rest.next();
                             Ok(false)
                         }
-                        Some(_) => Err(Error::unescaped_hole()),
-                        None => Err(Error::unescaped_hole()),
+                        Some(_) => Err(Error::unescaped_hole(
+                            state
+                                .lit
+                                .subspan(state.current_idx..state.current_idx + 1)
+                                .unwrap_or(state.lit.span()),
+                        )),
+                        None => Err(Error::unescaped_hole(
+                            state
+                                .lit
+                                .subspan(state.current_idx..state.current_idx + 1)
+                                .unwrap_or(state.lit.span()),
+                        )),
                     },
                     _ => Ok(false),
                 })?;
@@ -435,17 +529,19 @@ impl Part {
                 }
             }
 
-            fn take_until_hole_end(
-                &mut self,
-            ) -> Result<Option<(Cow<'input, str>, Range<usize>)>, Error> {
+            fn take_until_hole_end(&mut self) -> Result<(Cow<'input, str>, Range<usize>), Error> {
                 let mut depth = 1;
                 let mut matched_hole_end = false;
                 let mut escaped = false;
                 let mut next_terminator_escaped = false;
                 let mut terminator = None;
 
-                let scanned = self.take_until(|c, rest| {
-                    match c {
+                // NOTE: The starting point is the first char _after_ the opening `{`
+                // so to get a correct span here we subtract 1 from it to cover that character
+                let start = self.start - 1;
+
+                let scanned = self.take_until(|state| {
+                    match state.current {
                         // If the depth would return to its start then we've got a full expression
                         '}' if terminator.is_none() && depth == 1 => {
                             matched_hole_end = true;
@@ -476,7 +572,8 @@ impl Part {
                         // A `\` means there's embedded escaped characters
                         // These may be escapes the user needs to represent a `"`
                         // or they may be intended to appear in the final string
-                        '\\' if rest
+                        '\\' if state
+                            .rest
                             .peek()
                             .map(|(_, peeked)| *peeked == '\\')
                             .unwrap_or(false) =>
@@ -491,12 +588,18 @@ impl Part {
                         }
                         // The sequence `//` or `/*` means the expression contains a comment
                         // These aren't supported so bail with an error
-                        '/' if rest
+                        '/' if state
+                            .rest
                             .peek()
                             .map(|(_, peeked)| *peeked == '/' || *peeked == '*')
                             .unwrap_or(false) =>
                         {
-                            Err(Error::unsupported_comment())
+                            Err(Error::unsupported_comment(
+                                state
+                                    .lit
+                                    .subspan(state.current_idx..state.current_idx + 1)
+                                    .unwrap_or(state.lit.span()),
+                            ))
                         }
                         // If the current character is a terminator and it's not escaped
                         // then break out of the current string or character
@@ -514,16 +617,25 @@ impl Part {
                 })?;
 
                 if !matched_hole_end {
-                    Err(Error::incomplete_hole())?;
+                    Err(Error::incomplete_hole(
+                        self.lit
+                            .subspan(start..self.start)
+                            .unwrap_or(self.lit.span()),
+                    ))?;
                 }
 
                 match scanned {
                     Some((input, range)) if escaped => {
                         // If the input is escaped then replace `\"` with `"`
                         let input = (&*input).replace("\\\"", "\"");
-                        Ok(Some((Cow::Owned(input), range)))
+                        Ok((Cow::Owned(input), range))
                     }
-                    scanned => Ok(scanned),
+                    Some((input, range)) => Ok((input, range)),
+                    None => Err(Error::missing_expr(
+                        self.lit
+                            .subspan(start..self.start)
+                            .unwrap_or(self.lit.span()),
+                    ))?,
                 }
             }
         }
@@ -550,14 +662,17 @@ impl Part {
         // It doesn't bother with ensuring that last quote is unescaped
         // because the input to this is expected to be a proc-macro literal
         if start.map(|(_, c)| c) != Some('"') || end.map(|(_, c)| c) != Some('"') {
-            return Err(Error::invalid_literal());
+            return Err(Error::invalid_literal(lit.span()));
         }
 
+        // NOTE: The input is wrapped in quotes, so the actual content
+        // is from `input[1..input.len() - 1]`
         let mut scan = Scan {
+            lit,
             input: &input,
             start: 1,
             end: input.len() - 1,
-            iter: iter.peekable(),
+            rest: iter.peekable(),
         };
 
         while scan.has_input() {
@@ -574,32 +689,34 @@ impl Part {
                     continue;
                 }
                 Expecting::Hole => {
-                    match scan.take_until_hole_end()? {
-                        Some((expr, range)) => {
-                            let tokens = {
-                                let tokens: TokenStream =
-                                    str::parse(&*expr).map_err(|e| Error::lex_expr(&*expr, e))?;
+                    let (expr, range) = scan.take_until_hole_end()?;
 
-                                // Set the span to the correct place within the literal
-                                if let Some(span) = lit.subspan(range.start..range.end) {
-                                    tokens
-                                        .into_iter()
-                                        .map(|mut tt| {
-                                            tt.set_span(span);
-                                            tt
-                                        })
-                                        .collect()
-                                } else {
-                                    tokens
-                                }
-                            };
+                    let expr_span = scan.lit.subspan(range.start..range.end);
 
-                            let expr =
-                                syn::parse2(tokens).map_err(|e| Error::parse_expr(&*expr, e))?;
-                            parts.push(Part::Hole { expr, range });
+                    let tokens = {
+                        let tokens: TokenStream = str::parse(&*expr).map_err(|e| {
+                            Error::lex_expr(expr_span.unwrap_or(scan.lit.span()), &*expr, e)
+                        })?;
+
+                        // Set the span to the correct place within the literal
+                        if let Some(span) = scan.lit.subspan(range.start..range.end) {
+                            tokens
+                                .into_iter()
+                                .map(|mut tt| {
+                                    tt.set_span(span);
+                                    tt
+                                })
+                                .collect()
+                        } else {
+                            tokens
                         }
-                        None => Err(Error::missing_expr())?,
-                    }
+                    };
+
+                    let expr = syn::parse2(tokens).map_err(|e| {
+                        Error::parse_expr(expr_span.unwrap_or(scan.lit.span()), &*expr, e)
+                    })?;
+
+                    parts.push(Part::Hole { expr, range });
 
                     expecting = Expecting::TextOrEOF;
                     continue;
