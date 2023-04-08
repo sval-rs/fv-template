@@ -59,6 +59,14 @@ impl Error {
         self.span
     }
 
+    fn missing_template(span: Span) -> Self {
+        Error {
+            reason: format!("missing string template"),
+            source: None,
+            span,
+        }
+    }
+
     fn incomplete_hole(span: Span) -> Self {
         Error {
             reason: format!("unexpected end of input, expected `}}`"),
@@ -91,9 +99,13 @@ impl Error {
         }
     }
 
-    fn parse_fv_expr(span: Span, expr: &str, err: syn::Error) -> Self {
+    fn parse_fv_expr<'a>(span: Span, expr: impl Into<Option<&'a str>>, err: syn::Error) -> Self {
         Error {
-            reason: format!("failed to parse `{}` as a field-value expression", expr),
+            reason: if let Some(expr) = expr.into() {
+                format!("failed to parse `{}` as a field-value expression", expr)
+            } else {
+                format!("failed to parse field-value expression")
+            },
             span,
             source: Some(err.into()),
         }
@@ -222,11 +234,7 @@ impl Template {
                         let expr_span = arg.span();
 
                         result.push(syn::parse2::<FieldValue>(arg).map_err(|e| {
-                            Error::parse_fv_expr(
-                                expr_span,
-                                expr_span.source_text().as_deref().unwrap_or("<unknown>"),
-                                e,
-                            )
+                            Error::parse_fv_expr(expr_span, expr_span.source_text().as_deref(), e)
                         })?);
                     }
                 }
@@ -271,7 +279,7 @@ impl Template {
         };
 
         let template = Part::parse_lit2(Scan::take_literal(
-            template.expect("missing string template"),
+            template.ok_or_else(|| Error::missing_template(scan.span))?,
         )?)?;
 
         let before_template = Scan::new(before_template).collect_field_values()?;
@@ -746,6 +754,53 @@ mod tests {
     #[test]
     fn parse_ok() {
         let cases = vec![
+            quote!("template"),
+            quote!(a: 42, "temaplte"),
+            quote!("template", a: 42),
+            quote!(a: 42, "template", b: 42),
+        ];
+
+        for case in cases {
+            let _ = Template::parse2(case).unwrap();
+        }
+    }
+
+    #[test]
+    fn parse_err() {
+        let cases = vec![
+            (quote!(), "parsing failed: missing string template"),
+            (quote!(a: 42), "parsing failed: missing string template"),
+            (
+                quote!(42),
+                "parsing failed: templates must be parsed from string literals",
+            ),
+            (
+                quote!(a: 42, true),
+                "parsing failed: missing string template",
+            ),
+            (
+                quote!(fn x() {}, "template"),
+                "parsing failed: failed to parse field-value expression",
+            ),
+            (
+                quote!("template", fn x() {}),
+                "parsing failed: failed to parse field-value expression",
+            ),
+        ];
+
+        for (input, expected) in cases {
+            let actual = match Template::parse2(input) {
+                Err(e) => e,
+                Ok(_) => panic!("parsing should've failed but produced a value",),
+            };
+
+            assert_eq!(expected, actual.to_string(),);
+        }
+    }
+
+    #[test]
+    fn template_parse_ok() {
+        let cases = vec![
             ("", vec![]),
             ("", vec![]),
             ("Hello world 🎈📌", vec![text("Hello world 🎈📌", 1..21)]),
@@ -857,7 +912,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_err() {
+    fn template_parse_err() {
         let cases = vec![
             ("{", "parsing failed: unexpected end of input, expected `}`"),
             ("a {", "parsing failed: unexpected end of input, expected `}`"),
