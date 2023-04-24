@@ -29,19 +29,25 @@ A visitor for the construction of a runtime template.
 */
 pub trait Visitor {
     /**
-    Visit a hole.
+    Visit a text part.
     */
-    fn visit_hole(&mut self, label: &str, hole: TokenStream) -> TokenStream {
-        let _ = label;
-        hole
-    }
+    fn visit_text(&mut self, text: &str);
+
+    /**
+    Visit a hole part.
+    */
+    fn visit_hole(&mut self, label: &str, hole: &ExprLit);
 }
 
 impl<'a, V: ?Sized> Visitor for &'a mut V
 where
     V: Visitor,
 {
-    fn visit_hole(&mut self, label: &str, hole: TokenStream) -> TokenStream {
+    fn visit_text(&mut self, text: &str) {
+        (**self).visit_text(text)
+    }
+
+    fn visit_hole(&mut self, label: &str, hole: &ExprLit) {
         (**self).visit_hole(label, hole)
     }
 }
@@ -134,50 +140,71 @@ impl Template {
     Generate a `TokenStream` that constructs a runtime representation of this template.
     */
     pub fn to_rt_tokens(&self, base: TokenStream) -> TokenStream {
-        struct DefaultVisitor;
+        struct DefaultVisitor {
+            base: TokenStream,
+            parts: Vec<TokenStream>,
+        }
 
-        impl Visitor for DefaultVisitor {}
+        impl Visitor for DefaultVisitor {
+            fn visit_text(&mut self, text: &str) {
+                let base = &self.base;
 
-        self.to_rt_tokens_with_visitor(base, DefaultVisitor)
+                self.parts.push(quote!(#base::Part::Text(#text)));
+            }
+
+            fn visit_hole(&mut self, label: &str, hole: &ExprLit) {
+                let _ = label;
+                let base = &self.base;
+
+                self.parts.push(quote!(#base::Part::Hole(#hole)));
+            }
+        }
+
+        let mut visitor = DefaultVisitor {
+            base,
+            parts: Vec::new(),
+        };
+        self.visit(&mut visitor);
+
+        let base = &visitor.base;
+        let parts = &visitor.parts;
+
+        quote!(
+            #base::Template(&[#(#parts),*])
+        )
     }
 
     /**
-    Generate a `TokenStream` the constructs a runtime representation of this template.
+    Visit the parts of this template using the given visitor.
 
-    The `Visitor` has a chance to modify fragments of the template during code generation.
+    This method can be used to generate some custom runtime value based on the template.
     */
-    pub fn to_rt_tokens_with_visitor(
-        &self,
-        base: TokenStream,
-        mut visitor: impl Visitor,
-    ) -> TokenStream {
-        let parts = self.template.iter().map(|part| match part {
-            Part::Text { text, .. } => quote!(#base::Part::Text(#text)),
-            Part::Hole { expr, .. } => {
-                let (label, hole) = match expr.member {
-                    Member::Named(ref member) => (
-                        member.to_string(),
-                        ExprLit {
-                            attrs: vec![],
-                            lit: Lit::Str(LitStr::new(&member.to_string(), member.span())),
-                        },
-                    ),
-                    Member::Unnamed(ref member) => (
-                        member.index.to_string(),
-                        ExprLit {
-                            attrs: vec![],
-                            lit: Lit::Str(LitStr::new(&member.index.to_string(), member.span)),
-                        },
-                    ),
-                };
+    pub fn visit(&self, mut visitor: impl Visitor) {
+        for part in &self.template {
+            match part {
+                Part::Text { text, .. } => visitor.visit_text(text),
+                Part::Hole { expr, .. } => {
+                    let (label, hole) = match expr.member {
+                        Member::Named(ref member) => (
+                            member.to_string(),
+                            ExprLit {
+                                attrs: vec![],
+                                lit: Lit::Str(LitStr::new(&member.to_string(), member.span())),
+                            },
+                        ),
+                        Member::Unnamed(ref member) => (
+                            member.index.to_string(),
+                            ExprLit {
+                                attrs: vec![],
+                                lit: Lit::Str(LitStr::new(&member.index.to_string(), member.span)),
+                            },
+                        ),
+                    };
 
-                visitor.visit_hole(&label, quote!(#base::Part::Hole(#hole)))
+                    visitor.visit_hole(&label, &hole);
+                }
             }
-        });
-
-        quote!(
-            #base::template(&[#(#parts),*])
-        )
+        }
     }
 }
 
@@ -961,6 +988,28 @@ mod tests {
             expr: syn::parse_str(expr)
                 .unwrap_or_else(|e| panic!("failed to parse {:?} ({})", expr, e)),
             range,
+        }
+    }
+
+    #[test]
+    fn to_rt_tokens() {
+        let cases = vec![(
+            quote!("text and {label} and {more: 42}"),
+            quote!(crate::rt::Template(&[
+                crate::rt::Part::Text("text and "),
+                crate::rt::Part::Hole("label"),
+                crate::rt::Part::Text(" and "),
+                crate::rt::Part::Hole("more")
+            ])),
+        )];
+
+        for (template, expected) in cases {
+            let template = Template::parse2(template).unwrap();
+
+            assert_eq!(
+                expected.to_string(),
+                template.to_rt_tokens(quote!(crate::rt)).to_string()
+            );
         }
     }
 }

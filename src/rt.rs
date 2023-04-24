@@ -7,9 +7,8 @@ use std::fmt;
 /**
 A runtime field-value template.
 */
-pub struct Template<'a> {
-    parts: &'a [Part<'a>],
-}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Template<'a>(pub &'a [Part<'a>]);
 
 impl<'a> Template<'a> {
     /**
@@ -36,7 +35,7 @@ impl<'a> Template<'a> {
             TMissing: Fn(&mut fmt::Formatter, &str) -> fmt::Result,
         {
             fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-                for part in self.template.parts {
+                for part in self.template.0 {
                     match part {
                         Part::Text(text) => f.write_str(text)?,
                         Part::Hole(label) => {
@@ -134,6 +133,7 @@ A fragment of a template.
 A set of `Part`s can be concatenated to form a user-facing representation
 of a template.
 */
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Part<'a> {
     /**
     A plain text fragment.
@@ -143,13 +143,6 @@ pub enum Part<'a> {
     A hole in the template with a corresponding label to fill.
     */
     Hole(&'a str),
-}
-
-/**
-Construct a `Template` from a set of `Part`s.
-*/
-pub fn template<'a>(parts: &'a [Part<'a>]) -> Template<'a> {
-    Template { parts }
 }
 
 #[cfg(test)]
@@ -183,7 +176,7 @@ mod tests {
         ];
 
         for (parts, ctx, expected) in cases {
-            let template = template(parts);
+            let template = Template(parts);
 
             let actual = template.render(ctx).to_string();
 
