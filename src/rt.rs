@@ -7,6 +7,7 @@ use std::fmt;
 /**
 A runtime field-value template.
 */
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Template<'a>(pub &'a [Part<'a>]);
 
 impl<'a> Template<'a> {
@@ -132,6 +133,7 @@ A fragment of a template.
 A set of `Part`s can be concatenated to form a user-facing representation
 of a template.
 */
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Part<'a> {
     /**
     A plain text fragment.
