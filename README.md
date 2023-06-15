@@ -37,4 +37,4 @@ Templates also use different syntax for interpolated values. Because they're jus
 
 This library is intended to be used by proc-macro authors, like [`emit`](https://github.com/KodrAus/emit). It doesn't define any macros of its own.
 
-The `ct` module can be used in proc-macros to parse templates into an intermediate form that can then be used to emit code from the `rt` module.
+Parse a `Template` from some 

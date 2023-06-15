@@ -1,0 +1,21 @@
+[package]
+name = "fv_template_example_macros"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[lib]
+proc-macro = true
+
+[dependencies.fv-template]
+path = "../../"
+
+[dependencies.proc-macro2]
+version = "1"
+
+[dependencies.syn]
+version = "2"
+features = ["full"]
+
+[dependencies.quote]
+version = "1"
