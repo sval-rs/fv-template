@@ -50,6 +50,7 @@ When any of those trade-offs in `format_args!` becomes a problem, field-value te
 #[macro_use]
 extern crate quote;
 
+use std::fmt::Formatter;
 use std::{
     borrow::Cow,
     fmt,
@@ -61,7 +62,6 @@ use std::{
 use proc_macro2::{token_stream, Literal, Span, TokenStream, TokenTree};
 use quote::ToTokens;
 use syn::{spanned::Spanned, FieldValue};
-use thiserror::Error;
 
 /**
 A field-value template.
@@ -667,12 +667,23 @@ impl<'input> ScanPart<'input> {
 /**
 An error encountered while parsing a template.
  */
-#[derive(Error, Debug)]
-#[error("parsing failed: {reason}")]
+#[derive(Debug)]
 pub struct Error {
     reason: String,
     source: Option<Box<dyn std::error::Error>>,
     span: Span,
+}
+
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.source.as_deref()
+    }
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "parsing failed: {}", self.reason)
+    }
 }
 
 impl Error {
