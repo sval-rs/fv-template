@@ -1,0 +1,8 @@
+[package]
+name = "fv_template_example_app"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[dependencies.fv_template_example_macros]
+path = "../macros"

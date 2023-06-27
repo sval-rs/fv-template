@@ -21,6 +21,3 @@ version = "1"
 [dependencies.syn]
 version = "2"
 features = ["full", "visit-mut"]
-
-[dependencies.thiserror]
-version = "1"
