@@ -4,7 +4,7 @@ extern crate quote;
 use proc_macro2::TokenStream;
 use syn::{FieldValue, spanned::Spanned};
 
-use fv_template::{Template, TemplateVisitor};
+use fv_template::{Template, LiteralVisitor};
 
 #[proc_macro]
 pub fn template_args(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
@@ -21,7 +21,7 @@ fn expand_template_args(input: TokenStream) -> syn::Result<TokenStream> {
         .map_err(|e| syn::Error::new(span, e))?;
 
     // In this example, we only want to support expressions in the format string itself
-    if template.before_template_field_values().count() > 0 || template.after_template_field_values().count() > 0 {
+    if template.before_literal_field_values().count() > 0 || template.after_literal_field_values().count() > 0 {
         return Err(syn::Error::new(span, "arguments outside the template string are not supported"));
     }
 
@@ -32,7 +32,7 @@ fn expand_template_args(input: TokenStream) -> syn::Result<TokenStream> {
         args: Vec::new(),
     };
 
-    template.visit_template(&mut visitor);
+    template.visit_literal(&mut visitor);
 
     let fmt = visitor.fmt;
     let args = visitor.args;
@@ -45,7 +45,7 @@ struct FormatVisitor {
     args: Vec<TokenStream>,
 }
 
-impl TemplateVisitor for FormatVisitor {
+impl LiteralVisitor for FormatVisitor {
     fn visit_hole(&mut self, hole: &FieldValue) {
         let hole = &hole.expr;
 

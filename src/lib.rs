@@ -1,5 +1,49 @@
 /*!
-Compile-time and runtime support for string templates using field-value syntax.
+Compile-time support for interpolated string templates using field-value expressions.
+
+# Field-value templates
+
+A field-value template is a string literal surrounded by field-value expressions:
+
+```text
+   a, b: 42, "Some text {c} and {d: true}", e, f: "text"
+   ───┬────  ───────────────┬─────────────  ──────┬─────
+before literal           literal             after literal
+```
+
+The template string literal consists of blocks of text with holes between braces, where
+the value in a hole is a field-value expression:
+
+```text
+"Some text {c} and {d: true}"
+           ─┬─     ────┬────
+            └────┬─────┘
+                hole
+
+"Some text {c} and {d: true}"
+ ─────┬────   ──┬──
+      └────┬────┘
+         text
+```
+
+The syntax is similar to Rust's `format_args!` macro, but leans entirely on standard field-value
+expressions for specifying values to interpolate.
+
+# Why not `format_args!`?
+
+Rust's `format_args!` macro already defines a syntax for string interpolation, but isn't suitable
+for all situations:
+
+- It's core purpose is to build strings. `format_args!` is based on machinery that throws away
+type-specific information eagerly. It also performs optimizations at compile time that inline
+certain values into the builder.
+- It doesn't have a programmatic API. You can only make assumptions about how a `format_args!`
+invocation will behave by observing the syntactic tokens passed to it at compile-time. You don't get any
+visibility into the format literal itself.
+- Flags are compact for formatting, but don't scale. The `:?#<>` tokens used for customizing formatting
+are compact, but opaque, and don't naturally allow for arbitrarily complex annotation like attributes do.
+
+When any of those trade-offs in `format_args!` becomes a problem, field-value templates may be a solution.
 */
 
 #[cfg(test)]
@@ -20,34 +64,32 @@ use syn::{spanned::Spanned, FieldValue};
 use thiserror::Error;
 
 /**
-A compile-time field value template.
+A field-value template.
  */
 pub struct Template {
     before_template: Vec<FieldValue>,
-    template: Vec<Part>,
+    literal: Vec<LiteralPart>,
     after_template: Vec<FieldValue>,
 }
 
 /**
-A visitor for the construction of a runtime template.
+A visitor for the parts of a template string.
  */
-pub trait TemplateVisitor {
+pub trait LiteralVisitor {
     /**
-    Visit a text part.
+    Visit a text part in a template literal.
      */
     fn visit_text(&mut self, text: &str);
 
     /**
-    Visit a hole part.
-
-    The hole will be given a label
+    Visit a hole part in a template literal.
      */
     fn visit_hole(&mut self, hole: &FieldValue);
 }
 
-impl<'a, V: ?Sized> TemplateVisitor for &'a mut V
-    where
-        V: TemplateVisitor,
+impl<'a, V: ?Sized> LiteralVisitor for &'a mut V
+where
+    V: LiteralVisitor,
 {
     fn visit_text(&mut self, text: &str) {
         (**self).visit_text(text)
@@ -101,7 +143,7 @@ impl Template {
         };
 
         // Parse the template literal into its text fragments and field-value holes
-        let template = Part::parse_lit2(ScanTemplate::take_literal(
+        let template = LiteralPart::parse_lit2(ScanTemplate::take_literal(
             template.ok_or_else(|| Error::missing_template(scan.span))?,
         )?)?;
 
@@ -110,24 +152,26 @@ impl Template {
 
         Ok(Template {
             before_template,
-            template,
+            literal: template,
             after_template,
         })
     }
 
     /**
-    Field values that appear before the template string literal.
+    Field-values that appear before the template string literal.
      */
-    pub fn before_template_field_values<'a>(&'a self) -> impl Iterator<Item = &'a FieldValue> {
+    pub fn before_literal_field_values<'a>(&'a self) -> impl Iterator<Item = &'a FieldValue> {
         self.before_template.iter()
     }
 
     /**
-    Field values that appear within the template string literal.
+    Field-values that appear within the template string literal.
+
+    This is a simple alternative to [`Template::visit_literal`] that iterates over the field-value holes.
      */
-    pub fn template_field_values<'a>(&'a self) -> impl Iterator<Item = &'a FieldValue> {
-        self.template.iter().filter_map(|part| {
-            if let Part::Hole { expr, .. } = part {
+    pub fn literal_field_values<'a>(&'a self) -> impl Iterator<Item = &'a FieldValue> {
+        self.literal.iter().filter_map(|part| {
+            if let LiteralPart::Hole { expr, .. } = part {
                 Some(expr)
             } else {
                 None
@@ -136,53 +180,82 @@ impl Template {
     }
 
     /**
-    Field values that appear after the template string literal.
+    Field-values that appear after the template string literal.
      */
-    pub fn after_template_field_values<'a>(&'a self) -> impl Iterator<Item = &'a FieldValue> {
+    pub fn after_literal_field_values<'a>(&'a self) -> impl Iterator<Item = &'a FieldValue> {
         self.after_template.iter()
     }
 
     /**
-    Visit the parts of the string part of the template.
+    Visit the parts of the string literal part of the template.
 
     Each fragment of text and field-value hole will be visited in sequence.
+
+    Given a template string like:
+
+    ```text
+    Some text and a {hole} and some {more}.
+    ```
+
+    the visitor will be called with the following inputs:
+
+    1. `visit_text("Some text and a ")`
+    2. `visit_hole("hole")`
+    3. `visit_text(" and some ")`
+    4. `visit_hole("more")`
+    5. `visit_text(".")`
      */
-    pub fn visit_template(&self, mut visitor: impl TemplateVisitor) {
-        for part in &self.template {
+    pub fn visit_literal(&self, mut visitor: impl LiteralVisitor) {
+        for part in &self.literal {
             match part {
-                Part::Text { text, .. } => visitor.visit_text(text),
-                Part::Hole { expr, .. } => visitor.visit_hole(&expr),
+                LiteralPart::Text { text, .. } => visitor.visit_text(text),
+                LiteralPart::Hole { expr, .. } => visitor.visit_hole(&expr),
             }
         }
     }
 }
 
 /**
-A part of a parsed template.
+A part of a parsed template string literal.
  */
-enum Part {
+enum LiteralPart {
     /**
     A fragment of text.
      */
-    Text { text: String, range: Range<usize> },
+    Text {
+        /**
+        The literal text content.
+        */
+        text: String,
+        /**
+        The range within the template string that covers this part.
+        */
+        range: Range<usize>,
+    },
     /**
     A replacement expression.
      */
     Hole {
+        /**
+        The expression within the hole.
+        */
         expr: FieldValue,
+        /**
+        The range within the template string that covers this part.
+        */
         range: Range<usize>,
     },
 }
 
-impl fmt::Debug for Part {
+impl fmt::Debug for LiteralPart {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            Part::Text { text, range } => f
+            LiteralPart::Text { text, range } => f
                 .debug_struct("Text")
                 .field("text", text)
                 .field("range", range)
                 .finish(),
-            Part::Hole { expr, range } => f
+            LiteralPart::Hole { expr, range } => f
                 .debug_struct("Hole")
                 .field("expr", &format_args!("`{}`", expr.to_token_stream()))
                 .field("range", range)
@@ -191,7 +264,7 @@ impl fmt::Debug for Part {
     }
 }
 
-impl Part {
+impl LiteralPart {
     fn parse_lit2(lit: Literal) -> Result<Vec<Self>, Error> {
         enum Expecting {
             TextOrEOF,
@@ -213,7 +286,7 @@ impl Part {
             match expecting {
                 Expecting::TextOrEOF => {
                     if let Some((text, range)) = scan.take_until_eof_or_hole_start()? {
-                        parts.push(Part::Text {
+                        parts.push(LiteralPart::Text {
                             text: text.into_owned(),
                             range,
                         });
@@ -251,7 +324,7 @@ impl Part {
                         Error::parse_fv_expr(expr_span.unwrap_or(scan.lit.span()), &*expr, e)
                     })?;
 
-                    parts.push(Part::Hole { expr, range });
+                    parts.push(LiteralPart::Hole { expr, range });
 
                     expecting = Expecting::TextOrEOF;
                     continue;
@@ -528,11 +601,11 @@ impl<'input> ScanPart<'input> {
                     .peek()
                     .map(|(_, peeked)| *peeked == '\\')
                     .unwrap_or(false) =>
-                    {
-                        next_terminator_escaped = !next_terminator_escaped;
-                        escaped = true;
-                        Ok(false)
-                    }
+                {
+                    next_terminator_escaped = !next_terminator_escaped;
+                    escaped = true;
+                    Ok(false)
+                }
                 '\\' => {
                     escaped = true;
                     Ok(false)
@@ -544,14 +617,14 @@ impl<'input> ScanPart<'input> {
                     .peek()
                     .map(|(_, peeked)| *peeked == '/' || *peeked == '*')
                     .unwrap_or(false) =>
-                    {
-                        Err(Error::unsupported_comment(
-                            state
-                                .lit
-                                .subspan(state.current_idx..state.current_idx + 1)
-                                .unwrap_or(state.lit.span()),
-                        ))
-                    }
+                {
+                    Err(Error::unsupported_comment(
+                        state
+                            .lit
+                            .subspan(state.current_idx..state.current_idx + 1)
+                            .unwrap_or(state.lit.span()),
+                    ))
+                }
                 // If the current character is a terminator and it's not escaped
                 // then break out of the current string or character
                 c if Some(c) == terminator && !next_terminator_escaped => {
@@ -728,8 +801,8 @@ impl Error {
 
 #[cfg(test)]
 mod tests {
-    use syn::Member;
     use super::*;
+    use syn::Member;
 
     #[test]
     fn parse_ok() {
@@ -877,7 +950,7 @@ mod tests {
         ];
 
         for (template, expected) in cases {
-            let actual = match Part::parse_lit2(Literal::string(template)) {
+            let actual = match LiteralPart::parse_lit2(Literal::string(template)) {
                 Ok(template) => template,
                 Err(e) => panic!("failed to parse {:?}: {}", template, e),
             };
@@ -909,7 +982,7 @@ mod tests {
         ];
 
         for (template, expected) in cases {
-            let actual = match Part::parse_lit2(Literal::string(template)) {
+            let actual = match LiteralPart::parse_lit2(Literal::string(template)) {
                 Err(e) => e,
                 Ok(actual) => panic!(
                     "parsing {:?} should've failed but produced {:?}",
@@ -926,15 +999,15 @@ mod tests {
         }
     }
 
-    fn text(text: &str, range: Range<usize>) -> Part {
-        Part::Text {
+    fn text(text: &str, range: Range<usize>) -> LiteralPart {
+        LiteralPart::Text {
             text: text.to_owned(),
             range,
         }
     }
 
-    fn hole(expr: &str, range: Range<usize>) -> Part {
-        Part::Hole {
+    fn hole(expr: &str, range: Range<usize>) -> LiteralPart {
+        LiteralPart::Hole {
             expr: syn::parse_str(expr)
                 .unwrap_or_else(|e| panic!("failed to parse {:?} ({})", expr, e)),
             range,
@@ -949,7 +1022,7 @@ mod tests {
                 parts: Vec<TokenStream>,
             }
 
-            impl TemplateVisitor for DefaultVisitor {
+            impl LiteralVisitor for DefaultVisitor {
                 fn visit_text(&mut self, text: &str) {
                     let base = &self.base;
 
@@ -972,7 +1045,7 @@ mod tests {
                 base,
                 parts: Vec::new(),
             };
-            template.visit_template(&mut visitor);
+            template.visit_literal(&mut visitor);
 
             let base = &visitor.base;
             let parts = &visitor.parts;
