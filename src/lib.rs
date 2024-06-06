@@ -143,16 +143,18 @@ impl Template {
         };
 
         // Parse the template literal into its text fragments and field-value holes
-        let template = LiteralPart::parse_lit2(ScanTemplate::take_literal(
-            template.ok_or_else(|| Error::missing_template(scan.span))?,
-        )?)?;
+        let literal = if let Some(template) = template {
+            LiteralPart::parse_lit2(ScanTemplate::take_literal(template)?)?
+        } else {
+            Vec::new()
+        };
 
         let before_template = ScanTemplate::new(before_template).collect_field_values()?;
         let after_template = ScanTemplate::new(after_template).collect_field_values()?;
 
         Ok(Template {
             before_template,
-            literal: template,
+            literal,
             after_template,
         })
     }
@@ -180,6 +182,13 @@ impl Template {
     }
 
     /**
+    Whether the template contains a literal.
+    */
+    pub fn has_literal(&self) -> bool {
+        !self.literal.is_empty()
+    }
+
+    /**
     Field-values that appear after the template string literal.
      */
     pub fn after_literal_field_values<'a>(&'a self) -> impl Iterator<Item = &'a FieldValue> {
@@ -204,6 +213,8 @@ impl Template {
     3. `visit_text(" and some ")`
     4. `visit_hole("more")`
     5. `visit_text(".")`
+
+    If the template doesn't contain a literal then the visitor won't be called.
      */
     pub fn visit_literal(&self, mut visitor: impl LiteralVisitor) {
         for part in &self.literal {
@@ -691,14 +702,6 @@ impl Error {
         self.span
     }
 
-    fn missing_template(span: Span) -> Self {
-        Error {
-            reason: format!("missing string template"),
-            source: None,
-            span,
-        }
-    }
-
     fn incomplete_hole(span: Span) -> Self {
         Error {
             reason: format!("unexpected end of input, expected `}}`"),
@@ -818,6 +821,7 @@ mod tests {
     #[test]
     fn parse_ok() {
         let cases = vec![
+            quote!(),
             quote!("template"),
             quote!(a: 42, "temaplte"),
             quote!("template", a: 42),
@@ -832,15 +836,13 @@ mod tests {
     #[test]
     fn parse_err() {
         let cases = vec![
-            (quote!(), "parsing failed: missing string template"),
-            (quote!(a: 42), "parsing failed: missing string template"),
             (
                 quote!(42),
                 "parsing failed: templates must be parsed from string literals",
             ),
             (
                 quote!(a: 42, true),
-                "parsing failed: missing string template",
+                "parsing failed: failed to parse field-value expression",
             ),
             (
                 quote!(fn x() {}, "template"),
@@ -853,9 +855,9 @@ mod tests {
         ];
 
         for (input, expected) in cases {
-            let actual = match Template::parse2(input) {
+            let actual = match Template::parse2(input.clone()) {
                 Err(e) => e,
-                Ok(_) => panic!("parsing should've failed but produced a value",),
+                Ok(_) => panic!("parsing {} should've failed but produced a value", input),
             };
 
             assert_eq!(expected, actual.to_string(),);
@@ -1026,7 +1028,7 @@ mod tests {
     }
 
     #[test]
-    fn visit() {
+    fn visit_literal() {
         fn to_rt_tokens(template: &Template, base: TokenStream) -> TokenStream {
             struct DefaultVisitor {
                 base: TokenStream,
@@ -1079,10 +1081,64 @@ mod tests {
         for (template, expected) in cases {
             let template = Template::parse2(template).unwrap();
 
+            assert!(template.has_literal());
+
             assert_eq!(
                 expected.to_string(),
                 to_rt_tokens(&template, quote!(crate::rt)).to_string()
             );
         }
+    }
+
+    #[test]
+    fn visit_literal_empty() {
+        struct DefaultVisitor {
+            called: bool,
+        }
+
+        impl LiteralVisitor for DefaultVisitor {
+            fn visit_text(&mut self, _: &str) {
+                unreachable!()
+            }
+
+            fn visit_hole(&mut self, _: &FieldValue) {
+                unreachable!()
+            }
+        }
+
+        let mut visitor = DefaultVisitor { called: false };
+
+        let template = Template::parse2(quote!("")).unwrap();
+
+        template.visit_literal(&mut visitor);
+
+        assert!(!template.has_literal());
+        assert!(!visitor.called);
+    }
+
+    #[test]
+    fn visit_literal_none() {
+        struct DefaultVisitor {
+            called: bool,
+        }
+
+        impl LiteralVisitor for DefaultVisitor {
+            fn visit_text(&mut self, _: &str) {
+                unreachable!()
+            }
+
+            fn visit_hole(&mut self, _: &FieldValue) {
+                unreachable!()
+            }
+        }
+
+        let mut visitor = DefaultVisitor { called: false };
+
+        let template = Template::parse2(quote!()).unwrap();
+
+        template.visit_literal(&mut visitor);
+
+        assert!(!template.has_literal());
+        assert!(!visitor.called);
     }
 }
