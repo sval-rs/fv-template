@@ -182,6 +182,13 @@ impl Template {
     }
 
     /**
+    Whether the template contains a literal.
+    */
+    pub fn has_literal(&self) -> bool {
+        !self.literal.is_empty()
+    }
+
+    /**
     Field-values that appear after the template string literal.
      */
     pub fn after_literal_field_values<'a>(&'a self) -> impl Iterator<Item = &'a FieldValue> {
@@ -1074,6 +1081,8 @@ mod tests {
         for (template, expected) in cases {
             let template = Template::parse2(template).unwrap();
 
+            assert!(template.has_literal());
+
             assert_eq!(
                 expected.to_string(),
                 to_rt_tokens(&template, quote!(crate::rt)).to_string()
@@ -1103,6 +1112,7 @@ mod tests {
 
         template.visit_literal(&mut visitor);
 
+        assert!(!template.has_literal());
         assert!(!visitor.called);
     }
 
@@ -1128,6 +1138,7 @@ mod tests {
 
         template.visit_literal(&mut visitor);
 
+        assert!(!template.has_literal());
         assert!(!visitor.called);
     }
 }
