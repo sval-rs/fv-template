@@ -287,11 +287,16 @@ impl LiteralPart {
         let mut parts = Vec::new();
         let mut expecting = Expecting::TextOrEOF;
 
-        if input.len() == 0 {
-            return Ok(parts);
-        }
-
         let mut scan = ScanPart::new(lit, &input)?;
+
+        // If the template is empty then return a single text part
+        // This distinguishes an empty template from a missing template
+        if !scan.has_input() {
+            return Ok(vec![LiteralPart::Text {
+                text: String::new(),
+                range: 0..0,
+            }]);
+        }
 
         while scan.has_input() {
             match expecting {
@@ -821,15 +826,29 @@ mod tests {
     #[test]
     fn parse_ok() {
         let cases = vec![
-            quote!(),
-            quote!("template"),
-            quote!(a: 42, "temaplte"),
-            quote!("template", a: 42),
-            quote!(a: 42, "template", b: 42),
+            (quote!(), None::<&str>),
+            (quote!(""), Some("")),
+            (quote!("template"), Some("template")),
+            (quote!(a: 42, "template"), Some("template")),
+            (quote!("template", a: 42), Some("template")),
+            (quote!(a: 42, "template", b: 42), Some("template")),
         ];
 
-        for case in cases {
-            let _ = Template::parse2(case).unwrap();
+        for (case, expected) in cases {
+            let tpl = Template::parse2(case).unwrap();
+
+            if let Some(expected) = expected {
+                let Some(LiteralPart::Text { ref text, .. }) = tpl.literal.get(0) else {
+                    panic!(
+                        "unexpected template {:?} (expected {:?})",
+                        tpl.literal, expected
+                    );
+                };
+
+                assert_eq!(expected, text);
+            } else {
+                assert_eq!(0, tpl.literal.len(), "expected an empty template");
+            }
         }
     }
 
@@ -867,8 +886,7 @@ mod tests {
     #[test]
     fn template_parse_ok() {
         let cases = vec![
-            ("", vec![]),
-            ("", vec![]),
+            ("", vec![text("", 0..0)]),
             ("Hello world 🎈📌", vec![text("Hello world 🎈📌", 1..21)]),
             (
                 "Hello {world} 🎈📌",
@@ -1098,7 +1116,7 @@ mod tests {
 
         impl LiteralVisitor for DefaultVisitor {
             fn visit_text(&mut self, _: &str) {
-                unreachable!()
+                self.called = true;
             }
 
             fn visit_hole(&mut self, _: &FieldValue) {
@@ -1112,8 +1130,8 @@ mod tests {
 
         template.visit_literal(&mut visitor);
 
-        assert!(!template.has_literal());
-        assert!(!visitor.called);
+        assert!(template.has_literal());
+        assert!(visitor.called);
     }
 
     #[test]
