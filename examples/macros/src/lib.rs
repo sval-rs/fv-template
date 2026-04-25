@@ -2,9 +2,9 @@
 extern crate quote;
 
 use proc_macro2::TokenStream;
-use syn::{FieldValue, spanned::Spanned};
+use syn::spanned::Spanned;
 
-use fv_template::{Template, LiteralVisitor};
+use fv_template::{Hole, LiteralVisitor, Template, Text};
 
 #[proc_macro]
 pub fn template_args(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
@@ -17,12 +17,16 @@ fn expand_template_args(input: TokenStream) -> syn::Result<TokenStream> {
     let span = input.span();
 
     // First, parse the template
-    let template = Template::parse2(input)
-        .map_err(|e| syn::Error::new(span, e))?;
+    let template = Template::parse2(input).map_err(|e| syn::Error::new(span, e))?;
 
     // In this example, we only want to support expressions in the format string itself
-    if template.before_literal_field_values().count() > 0 || template.after_literal_field_values().count() > 0 {
-        return Err(syn::Error::new(span, "arguments outside the template string are not supported"));
+    if template.before_literal_field_values().count() > 0
+        || template.after_literal_field_values().count() > 0
+    {
+        return Err(syn::Error::new(
+            span,
+            "arguments outside the template string are not supported",
+        ));
     }
 
     // Create a visitor that will get each fragment of the template string
@@ -46,14 +50,14 @@ struct FormatVisitor {
 }
 
 impl LiteralVisitor for FormatVisitor {
-    fn visit_hole(&mut self, hole: &FieldValue) {
-        let hole = &hole.expr;
+    fn visit_hole(&mut self, hole: Hole) {
+        let hole = &hole.get().expr;
 
         self.fmt.push_str("{}");
         self.args.push(quote!(#hole));
     }
 
-    fn visit_text(&mut self, text: &str) {
-        self.fmt.push_str(text);
+    fn visit_text(&mut self, text: Text) {
+        self.fmt.push_str(text.get());
     }
 }

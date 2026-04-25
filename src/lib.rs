@@ -73,29 +73,72 @@ pub struct Template {
 }
 
 /**
+A text fragment in a template.
+*/
+pub struct Text<'a> {
+    text: &'a str,
+    needs_escaping: bool,
+}
+
+impl<'a> Text<'a> {
+    /**
+    Get the value of the text fragment.
+
+    Any `{{` or `}}` escape sequences will be replaced by raw `{` and `}`.
+    The [`Text::needs_escaping`] method will return `true` if any escape sequences were present.
+    */
+    pub fn get(&self) -> &str {
+        &self.text
+    }
+
+    /**
+    Whether the original text fragment contained `{{` or `}}` escape sequences.
+
+    If this method returns `true`, then any `{` and `}` in the value of [`Text::get`] will need to
+    be re-escaped to roundtrip the fragment.
+    */
+    pub fn needs_escaping(&self) -> bool {
+        self.needs_escaping
+    }
+}
+
+/**
+A hole fragment in a template.
+*/
+pub struct Hole<'a> {
+    expr: &'a FieldValue,
+}
+
+impl<'a> Hole<'a> {
+    pub fn get(&self) -> &FieldValue {
+        self.expr
+    }
+}
+
+/**
 A visitor for the parts of a template string.
  */
 pub trait LiteralVisitor {
     /**
     Visit a text part in a template literal.
      */
-    fn visit_text(&mut self, text: &str);
+    fn visit_text(&mut self, text: Text);
 
     /**
     Visit a hole part in a template literal.
      */
-    fn visit_hole(&mut self, hole: &FieldValue);
+    fn visit_hole(&mut self, hole: Hole);
 }
 
 impl<'a, V: ?Sized> LiteralVisitor for &'a mut V
 where
     V: LiteralVisitor,
 {
-    fn visit_text(&mut self, text: &str) {
+    fn visit_text(&mut self, text: Text) {
         (**self).visit_text(text)
     }
 
-    fn visit_hole(&mut self, hole: &FieldValue) {
+    fn visit_hole(&mut self, hole: Hole) {
         (**self).visit_hole(hole)
     }
 }
@@ -219,8 +262,15 @@ impl Template {
     pub fn visit_literal(&self, mut visitor: impl LiteralVisitor) {
         for part in &self.literal {
             match part {
-                LiteralPart::Text { text, .. } => visitor.visit_text(text),
-                LiteralPart::Hole { expr, .. } => visitor.visit_hole(&expr),
+                LiteralPart::Text {
+                    text,
+                    needs_escaping,
+                    ..
+                } => visitor.visit_text(Text {
+                    text,
+                    needs_escaping: *needs_escaping,
+                }),
+                LiteralPart::Hole { expr, .. } => visitor.visit_hole(Hole { expr }),
             }
         }
     }
@@ -238,6 +288,10 @@ enum LiteralPart {
         The literal text content.
         */
         text: String,
+        /**
+        Whether the text contains `{` or `}` characters that would need to be escaped to roundtrip.
+        */
+        needs_escaping: bool,
         /**
         The range within the template string that covers this part.
         */
@@ -261,9 +315,14 @@ enum LiteralPart {
 impl fmt::Debug for LiteralPart {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            LiteralPart::Text { text, range } => f
+            LiteralPart::Text {
+                text,
+                needs_escaping,
+                range,
+            } => f
                 .debug_struct("Text")
                 .field("text", text)
+                .field("needs_escaping", needs_escaping)
                 .field("range", range)
                 .finish(),
             LiteralPart::Hole { expr, range } => f
@@ -294,6 +353,7 @@ impl LiteralPart {
         if !scan.has_input() {
             return Ok(vec![LiteralPart::Text {
                 text: String::new(),
+                needs_escaping: false,
                 range: 0..0,
             }]);
         }
@@ -301,9 +361,12 @@ impl LiteralPart {
         while scan.has_input() {
             match expecting {
                 Expecting::TextOrEOF => {
-                    if let Some((text, range)) = scan.take_until_eof_or_hole_start()? {
+                    if let Some((text, needs_escaping, range)) =
+                        scan.take_until_eof_or_hole_start()?
+                    {
                         parts.push(LiteralPart::Text {
                             text: text.into_owned(),
+                            needs_escaping,
                             range,
                         });
                     }
@@ -509,7 +572,7 @@ impl<'input> ScanPart<'input> {
 
     fn take_until_eof_or_hole_start(
         &mut self,
-    ) -> Result<Option<(Cow<'input, str>, Range<usize>)>, Error> {
+    ) -> Result<Option<(Cow<'input, str>, bool, Range<usize>)>, Error> {
         let mut escaped = false;
         let scanned = self.take_until(|state| match state.current {
             // A `{` that's followed by another `{` is escaped
@@ -563,9 +626,10 @@ impl<'input> ScanPart<'input> {
             Some((input, range)) if escaped => {
                 // If the input is escaped, then replace `{{` and `}}` chars
                 let input = (&*input).replace("{{", "{").replace("}}", "}");
-                Ok(Some((Cow::Owned(input), range)))
+                Ok(Some((Cow::Owned(input), true, range)))
             }
-            scanned => Ok(scanned),
+            Some((input, range)) => Ok(Some((input, false, range))),
+            None => Ok(None),
         }
     }
 
@@ -886,44 +950,51 @@ mod tests {
     #[test]
     fn template_parse_ok() {
         let cases = vec![
-            ("", vec![text("", 0..0)]),
-            ("Hello world 🎈📌", vec![text("Hello world 🎈📌", 1..21)]),
+            ("", vec![text("", false, 0..0)]),
+            (
+                "Hello world 🎈📌",
+                vec![text("Hello world 🎈📌", false, 1..21)],
+            ),
             (
                 "Hello {world} 🎈📌",
                 vec![
-                    text("Hello ", 1..7),
+                    text("Hello ", false, 1..7),
                     hole("world", 8..13),
-                    text(" 🎈📌", 14..23),
+                    text(" 🎈📌", false, 14..23),
                 ],
             ),
             ("{world}", vec![hole("world", 2..7)]),
             (
                 "Hello {#[log::debug] world} 🎈📌",
                 vec![
-                    text("Hello ", 1..7),
+                    text("Hello ", false, 1..7),
                     hole("#[log::debug] world", 8..27),
-                    text(" 🎈📌", 28..37),
+                    text(" 🎈📌", false, 28..37),
                 ],
             ),
             (
                 "Hello {#[log::debug] world: 42} 🎈📌",
                 vec![
-                    text("Hello ", 1..7),
+                    text("Hello ", false, 1..7),
                     hole("#[log::debug] world: 42", 8..31),
-                    text(" 🎈📌", 32..41),
+                    text(" 🎈📌", false, 32..41),
                 ],
             ),
             (
                 "Hello {#[log::debug] world: \"is text\"} 🎈📌",
                 vec![
-                    text("Hello ", 1..7),
+                    text("Hello ", false, 1..7),
                     hole("#[log::debug] world: \"is text\"", 8..40),
-                    text(" 🎈📌", 41..50),
+                    text(" 🎈📌", false, 41..50),
                 ],
             ),
             (
                 "{Hello} {world}",
-                vec![hole("Hello", 2..7), text(" ", 8..9), hole("world", 10..15)],
+                vec![
+                    hole("Hello", 2..7),
+                    text(" ", false, 8..9),
+                    hole("world", 10..15),
+                ],
             ),
             (
                 "{a}{b}{c}",
@@ -932,52 +1003,52 @@ mod tests {
             (
                 "🎈📌{a}🎈📌{b}🎈📌{c}🎈📌",
                 vec![
-                    text("🎈📌", 1..9),
+                    text("🎈📌", false, 1..9),
                     hole("a", 10..11),
-                    text("🎈📌", 12..20),
+                    text("🎈📌", false, 12..20),
                     hole("b", 21..22),
-                    text("🎈📌", 23..31),
+                    text("🎈📌", false, 23..31),
                     hole("c", 32..33),
-                    text("🎈📌", 34..42),
+                    text("🎈📌", false, 34..42),
                 ],
             ),
             (
                 "Hello 🎈📌 {{world}}",
-                vec![text("Hello 🎈📌 {world}", 1..25)],
+                vec![text("Hello 🎈📌 {world}", true, 1..25)],
             ),
             (
                 "🎈📌 Hello world {{}}",
-                vec![text("🎈📌 Hello world {}", 1..26)],
+                vec![text("🎈📌 Hello world {}", true, 1..26)],
             ),
             (
                 "Hello {#[log::debug] world: \"{\"} 🎈📌",
                 vec![
-                    text("Hello ", 1..7),
+                    text("Hello ", false, 1..7),
                     hole("#[log::debug] world: \"{\"", 8..34),
-                    text(" 🎈📌", 35..44),
+                    text(" 🎈📌", false, 35..44),
                 ],
             ),
             (
                 "Hello {#[log::debug] world: '{'} 🎈📌",
                 vec![
-                    text("Hello ", 1..7),
+                    text("Hello ", false, 1..7),
                     hole("#[log::debug] world: '{'", 8..32),
-                    text(" 🎈📌", 33..42),
+                    text(" 🎈📌", false, 33..42),
                 ],
             ),
             (
                 "Hello {#[log::debug] world: \"is text with 'embedded' stuff\"} 🎈📌",
                 vec![
-                    text("Hello ", 1..7),
+                    text("Hello ", false, 1..7),
                     hole(
                         "#[log::debug] world: \"is text with 'embedded' stuff\"",
                         8..62,
                     ),
-                    text(" 🎈📌", 63..72),
+                    text(" 🎈📌", false, 63..72),
                 ],
             ),
-            ("{{", vec![text("{", 1..3)]),
-            ("}}", vec![text("}", 1..3)]),
+            ("{{", vec![text("{", true, 1..3)]),
+            ("}}", vec![text("}", true, 1..3)]),
         ];
 
         for (template, expected) in cases {
@@ -998,6 +1069,7 @@ mod tests {
     #[test]
     fn template_parse_err() {
         let cases = vec![
+            ("a {{}", "parsing failed: `{` and `}` characters must be escaped as `{{` and `}}`"),
             ("{", "parsing failed: unexpected end of input, expected `}`"),
             ("a {", "parsing failed: unexpected end of input, expected `}`"),
             ("a { a", "parsing failed: unexpected end of input, expected `}`"),
@@ -1030,9 +1102,10 @@ mod tests {
         }
     }
 
-    fn text(text: &str, range: Range<usize>) -> LiteralPart {
+    fn text(text: &str, needs_escaping: bool, range: Range<usize>) -> LiteralPart {
         LiteralPart::Text {
             text: text.to_owned(),
+            needs_escaping,
             range,
         }
     }
@@ -1054,14 +1127,15 @@ mod tests {
             }
 
             impl LiteralVisitor for DefaultVisitor {
-                fn visit_text(&mut self, text: &str) {
+                fn visit_text(&mut self, text: Text) {
                     let base = &self.base;
+                    let text = text.get();
 
                     self.parts.push(quote!(#base::Part::Text(#text)));
                 }
 
-                fn visit_hole(&mut self, hole: &FieldValue) {
-                    let hole = match hole.member {
+                fn visit_hole(&mut self, hole: Hole) {
+                    let hole = match hole.get().member {
                         Member::Named(ref member) => member.to_string(),
                         Member::Unnamed(ref member) => member.index.to_string(),
                     };
@@ -1115,11 +1189,11 @@ mod tests {
         }
 
         impl LiteralVisitor for DefaultVisitor {
-            fn visit_text(&mut self, _: &str) {
+            fn visit_text(&mut self, _: Text) {
                 self.called = true;
             }
 
-            fn visit_hole(&mut self, _: &FieldValue) {
+            fn visit_hole(&mut self, _: Hole) {
                 unreachable!()
             }
         }
@@ -1141,11 +1215,11 @@ mod tests {
         }
 
         impl LiteralVisitor for DefaultVisitor {
-            fn visit_text(&mut self, _: &str) {
+            fn visit_text(&mut self, _: Text) {
                 unreachable!()
             }
 
-            fn visit_hole(&mut self, _: &FieldValue) {
+            fn visit_hole(&mut self, _: Hole) {
                 unreachable!()
             }
         }
