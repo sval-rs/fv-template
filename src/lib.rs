@@ -902,7 +902,7 @@ mod tests {
             let tpl = Template::parse2(case).unwrap();
 
             if let Some(expected) = expected {
-                let Some(LiteralPart::Text { ref text, .. }) = tpl.literal.get(0) else {
+                let Some(LiteralPart::Text { text, .. }) = tpl.literal.get(0) else {
                     panic!(
                         "unexpected template {:?} (expected {:?})",
                         tpl.literal, expected
